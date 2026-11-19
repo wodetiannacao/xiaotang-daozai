@@ -56,13 +56,20 @@ function Replace-AllVerified([string]$Path, [string]$Old, [string]$New, [int]$Ex
 }
 
 
+function Convert-ToFileNewlines([string]$Text, [string]$Newline) {
+    return $Text.Replace("`r`n", "`n").Replace("`n", $Newline)
+}
+
 function Replace-UniqueSnippet([string]$Path, [string]$Old, [string]$New, [string]$Label) {
     $text = Read-Utf8NoBom $Path
-    $oldHits = [regex]::Matches($text, [regex]::Escape($Old)).Count
-    $newHits = [regex]::Matches($text, [regex]::Escape($New)).Count
+    $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $oldText = Convert-ToFileNewlines $Old $newline
+    $newText = Convert-ToFileNewlines $New $newline
+    $oldHits = [regex]::Matches($text, [regex]::Escape($oldText)).Count
+    $newHits = [regex]::Matches($text, [regex]::Escape($newText)).Count
     if ($oldHits -eq 1) {
-        $offset = $text.IndexOf($Old)
-        Write-Utf8NoBom $Path ($text.Substring(0, $offset) + $New + $text.Substring($offset + $Old.Length))
+        $offset = $text.IndexOf($oldText)
+        Write-Utf8NoBom $Path ($text.Substring(0, $offset) + $newText + $text.Substring($offset + $oldText.Length))
         return
     }
     if ($oldHits -eq 0 -and $newHits -eq 1) {

@@ -110,6 +110,10 @@ jobs:
         with:
           path: fork
 
+      - name: Keep upstream sources as LF
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
       - name: Checkout upstream tag
         uses: actions/checkout@v4
         with:
