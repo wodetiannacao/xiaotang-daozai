@@ -2,9 +2,9 @@
 use eframe::egui;
 use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 
-const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
-const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
-const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
+const REPOSITORY: &str = "https://github.com/wodetiannacao/xiaotang-daozai";
+const API: &str = "https://api.github.com/repos/wodetiannacao/xiaotang-daozai/releases/latest";
+const RELEASES: &str = "https://github.com/wodetiannacao/xiaotang-daozai/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
 const STARTUP_DELAY: Duration = Duration::from_secs(10);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);

@@ -83,8 +83,8 @@ pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
-const HOVER_INTENT: f64 = 0.20;
-const MINIMAL_HOVER_INTENT: f64 = 0.40;
+const HOVER_INTENT: f64 = 0.05;
+const MINIMAL_HOVER_INTENT: f64 = 0.10;
 /// 移开后等待多久开始收起；这段时间内回来不会收。
 const LEAVE_DELAY: f64 = 0.12;
 const PAGE_EDGE_OVERLAP: f32 = 8.0;

@@ -1,0 +1,223 @@
+name: Sync and release patched build
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag such as v0.6.66; empty uses the latest official release'
+        required: false
+        default: ''
+        type: string
+      force:
+        description: 'Force rebuild and replace the existing fork release for that tag'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: sync-and-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      upstream_url: ${{ steps.decide.outputs.upstream_url }}
+      upstream_title: ${{ steps.decide.outputs.upstream_title }}
+    steps:
+      - name: Decide whether a patched release is needed
+        id: decide
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: Renly1994/xiaotang-daozai
+          FORK_REPO: wodetiannacao/xiaotang-daozai
+        run: |
+          set -euo pipefail
+          REQUESTED_TAG="${REQUESTED_TAG//$'\r'/}"
+          REQUESTED_TAG="${REQUESTED_TAG// /}"
+          if [ -n "$REQUESTED_TAG" ]; then
+            if ! printf '%s' "$REQUESTED_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid tag: $REQUESTED_TAG" >&2
+              exit 1
+            fi
+            meta=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${REQUESTED_TAG}")
+          else
+            meta=$(gh api "repos/${UPSTREAM_REPO}/releases/latest")
+          fi
+          draft=$(printf '%s' "$meta" | jq -r '.draft')
+          prerelease=$(printf '%s' "$meta" | jq -r '.prerelease')
+          tag=$(printf '%s' "$meta" | jq -r '.tag_name')
+          title=$(printf '%s' "$meta" | jq -r '.name // .tag_name')
+          url=$(printf '%s' "$meta" | jq -r '.html_url')
+          if [ "$draft" != "false" ] || [ "$prerelease" != "false" ]; then
+            echo "Upstream release $tag is draft or prerelease; refusing to sync." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Unexpected upstream tag: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          zip_name="Daozai-v${version}-windows-x64.zip"
+          should_build=true
+          if fork_rel=$(gh api "repos/${FORK_REPO}/releases/tags/${tag}" 2>/dev/null); then
+            fork_draft=$(printf '%s' "$fork_rel" | jq -r '.draft')
+            fork_pre=$(printf '%s' "$fork_rel" | jq -r '.prerelease')
+            has_zip=$(printf '%s' "$fork_rel" | jq -r --arg n "$zip_name" '[.assets[].name] | index($n) != null')
+            if [ "$FORCE" != "true" ] && [ "$fork_draft" = "false" ] && [ "$fork_pre" = "false" ] && [ "$has_zip" = "true" ]; then
+              should_build=false
+              echo "Fork already has a published release for $tag with $zip_name."
+            fi
+          fi
+          {
+            echo "should_build=$should_build"
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "upstream_url=$url"
+            echo "upstream_title<<TITLE_EOF"
+            printf '%s\n' "$title"
+            echo "TITLE_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "should_build=$should_build tag=$tag version=$version"
+
+  build-and-release:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORK_REPO: wodetiannacao/xiaotang-daozai
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      UPSTREAM_URL: ${{ needs.check.outputs.upstream_url }}
+      UPSTREAM_TITLE: ${{ needs.check.outputs.upstream_title }}
+      FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+      DAOZAI_BUILD_LABEL: hover-50ms
+    steps:
+      - name: Checkout fork scripts
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Checkout upstream tag
+        uses: actions/checkout@v4
+        with:
+          repository: Renly1994/xiaotang-daozai
+          ref: ${{ needs.check.outputs.tag }}
+          path: upstream
+
+      - name: Apply custom hover and updater patch
+        shell: pwsh
+        run: |
+          ./fork/scripts/apply-custom-patch.ps1 -RepoRoot (Resolve-Path ./upstream).Path
+          git -C upstream --no-pager diff
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Verify HTTP proxy request format
+        run: cargo +stable test --locked --manifest-path vendor/ureq/Cargo.toml --lib --no-default-features --features tls,gzip --target x86_64-pc-windows-msvc unit::tests
+        working-directory: upstream
+
+      - name: Test
+        run: cargo +stable test --locked --all-targets --features record --target x86_64-pc-windows-msvc -- --test-threads=1
+        working-directory: upstream
+
+      - name: Package release artifacts
+        shell: pwsh
+        working-directory: upstream
+        env:
+          DAOZAI_BUILD_LABEL: hover-50ms
+        run: |
+          $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
+          ./scripts/package.ps1 -NsisCompiler $compiler
+
+      - name: Verify packaged artifacts
+        shell: pwsh
+        run: |
+          $version = $env:VERSION
+          $dist = Resolve-Path ./upstream/dist
+          $zipName = "Daozai-v$version-windows-x64.zip"
+          $setupName = "Daozai-Setup-v$version-x64.exe"
+          $zip = Join-Path $dist $zipName
+          $setup = Join-Path $dist $setupName
+          $sums = Join-Path $dist 'SHA256SUMS.txt'
+          foreach ($path in @($zip, $setup, $sums)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "缺少产物：$path" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $expected = "Daozai-v$version-windows-x64/daozai.exe"
+            $entries = @($archive.Entries | Where-Object { $_.FullName.Replace('\','/') -ceq $expected })
+            if ($entries.Count -ne 1 -or $entries[0].Length -le 0) {
+              throw "更新包中缺少 $expected"
+            }
+          } finally { $archive.Dispose() }
+          $sumLines = Get-Content -LiteralPath $sums
+          foreach ($name in @($zipName, $setupName)) {
+            $line = $sumLines | Where-Object { $_ -match ("  {0}$" -f [regex]::Escape($name)) }
+            if (-not $line) { throw "SHA256SUMS.txt 缺少 $name" }
+            $expectedHash = ($line -split '\s+')[0].ToLowerInvariant()
+            $actualHash = (Get-FileHash -LiteralPath (Join-Path $dist $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($expectedHash -ne $actualHash) { throw "$name 的 SHA256 与 SHA256SUMS.txt 不一致" }
+          }
+          Write-Host "Artifacts verified in $dist"
+
+      - name: Commit patch, push tag, and publish GitHub Release
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          $version = $env:VERSION
+          $title = "$($env:UPSTREAM_TITLE)（50ms 悬停补丁版）"
+          $notes = @"
+          基于上游 [$tag]($($env:UPSTREAM_URL)) 自动构建的补丁版。
+
+          - HOVER_INTENT: 0.20s -> 0.05s
+          - MINIMAL_HOVER_INTENT: 0.40s -> 0.10s
+          - 应用内自动更新源改为 ``wodetiannacao/xiaotang-daozai``
+
+          LEAVE_DELAY 与 LIFT_HOLD 未改动。About 页构建标签为 ``hover-50ms``（不影响版本号与更新比较）。
+          "@
+          $notes = $notes -replace '(?m)^          ', ''
+
+          if ($env:FORCE -eq 'true') {
+            gh release view $tag --repo $env:FORK_REPO 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              gh release delete $tag --repo $env:FORK_REPO --yes --cleanup-tag
+            }
+          }
+
+          git -C upstream config user.name "github-actions[bot]"
+          git -C upstream config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C upstream config core.autocrlf false
+          git -C upstream add -- src/app.rs src/updates.rs
+          if (-not (git -C upstream diff --cached --quiet)) {
+            git -C upstream commit -m "Apply 50ms hover patch and retarget updater to $env:FORK_REPO"
+          }
+          git -C upstream tag -d $tag 2>$null
+          git -C upstream tag $tag
+          git config --global --unset-all http.https://github.com/.extraheader
+          gh auth setup-git
+          git -C upstream push "https://github.com/$($env:FORK_REPO).git" "refs/tags/${tag}" --force
+
+          $dist = Resolve-Path ./upstream/dist
+          gh release create $tag `
+            --repo $env:FORK_REPO `
+            --title $title `
+            --notes $notes `
+            --latest `
+            (Join-Path $dist "Daozai-v$version-windows-x64.zip") `
+            (Join-Path $dist "Daozai-Setup-v$version-x64.exe") `
+            (Join-Path $dist 'SHA256SUMS.txt')
