@@ -8381,6 +8381,9 @@ fn wheel_page_lock_expires_after_pause_or_pointer_move_and_scrolls_lists(){
     h.wheel(-40.0);assert_eq!(h.app.page,3);
     h.hover(H::local(300.0,72.0),0.05);
     h.wheel(-40.0);assert_eq!(h.app.page,3,"移动超过 10px 后应解锁并滚动列表");assert_eq!(h.app.clip_first,1);
+    // 剪贴板内容区几乎铺满面板，(300,60) 落在溢出列表内时滚轮只会翻列表而不会切页。
+    // 改回未溢出的文件分栏，才能从置物架切到待办并启动锁定，再原地等待过期后滚待办。
+    h.app.shelf_tab=0;h.app.shelf.items.clear();
     h.app.show_page(3);h.app.todo_first=0;h.hover(H::local(300.0,60.0),0.5);
     h.wheel(-40.0);assert_eq!(h.app.page,4);assert_eq!(h.app.todo_first,0);
     h.hover(H::local(300.0,60.0),0.7);
