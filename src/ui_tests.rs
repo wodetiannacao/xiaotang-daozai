@@ -1190,6 +1190,9 @@ impl H {
         Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,page_transition:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,screen_locked:false,fullscreen:false,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
+        self.frame_with(events, Default::default());
+    }
+    fn frame_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
         self.t += 1.0 / 60.0;
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(crate::app::CANVAS_W, WIN_H))),
@@ -1198,6 +1201,7 @@ impl H {
             hovered_files:self.hovered_files.clone(),
             dropped_files:std::mem::take(&mut self.dropped_files),
             focused: true,
+            modifiers,
             ..Default::default()
         };
         self.app.filter_todo_input(&mut raw);
@@ -1255,6 +1259,10 @@ impl H {
     fn click_notice_badge(&mut self){if self.app.compact_notices(){self.click(Pos2::new(WIN_W/2.0+(self.app.current_width()-44.0)/2.0+26.0,15.0));}}
     fn wheel(&mut self,delta:f32) {
         self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:Default::default()}]);
+    }
+    fn wheel_shift(&mut self,delta:f32) {
+        // egui 0.31 会按 Event 与 RawInput 两处的 Shift 把垂直滚轮写进 raw_scroll_delta.x。
+        self.frame_with(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:egui::Modifiers::SHIFT}],egui::Modifiers::SHIFT);
     }
     fn picker_frame(&mut self,events:Vec<egui::Event>){
         self.frame(events);
@@ -8327,6 +8335,95 @@ fn mail_reading_wheel_over_headers_never_turns_pages(){
     h.click(H::local(350.0,48.0));assert!(h.app.mail.open_uid.is_none());
     h.hover(H::local(210.0,18.0),0.5);h.wheel(-120.0);
     assert_eq!(h.app.page(),6,"返回列表后顶栏滚轮应恢复翻页");
+}
+
+fn overflowing_clipboard(h:&mut H){
+    h.app.shelf_tab=1;
+    h.app.clip_first=0;
+    h.app.clipboard.lock().items.clear();
+    for i in 0..(crate::pages::CLIP_ROWS+2){h.app.clipboard.lock().push(&format!("clip {i}"),"09:00");}
+}
+fn overflowing_todos(h:&mut H){
+    h.app.todo_first=0;
+    h.app.todos.items=(0..6).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),..Default::default()}).collect();
+}
+fn overflowing_mailbox(h:&mut H){
+    h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+    h.app.mail.recent=(1..=8).map(|uid|crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:format!("来源 {uid}"),subject:format!("邮件 {uid}"),time:"11-03 09:41".into(),code:None,html:String::new().into(),summary:String::new().into(),links:vec![],meeting:None,uid}).collect();
+}
+
+#[test]
+fn wheel_page_lock_crosses_overflowing_clipboard_todo_and_mail_and_allows_reverse(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    overflowing_clipboard(&mut h);overflowing_todos(&mut h);overflowing_mailbox(&mut h);
+    let stay=H::local(300.0,60.0);
+    h.app.show_page(2);h.hover(stay,0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,3,"应从健康页滚进剪贴板");assert_eq!(h.app.clip_first,0);
+    h.hover(stay,0.12);h.wheel(-40.0);assert_eq!(h.app.page,4,"0.6s 内不动鼠标应穿过溢出的剪贴板");assert_eq!(h.app.clip_first,0,"惯性切页不能带动剪贴板列表");
+    h.hover(stay,0.12);h.wheel(-40.0);assert_eq!(h.app.page,5,"0.6s 内应继续穿过溢出的待办");assert_eq!(h.app.todo_first,0);
+    h.hover(stay,0.12);h.wheel(-40.0);assert_eq!(h.app.page,6,"0.6s 内应穿过邮箱列表");
+    h.hover(stay,0.12);h.wheel(40.0);assert_eq!(h.app.page,5,"反向惯性应从额度页回到邮箱");
+    h.hover(stay,0.12);h.wheel(40.0);assert_eq!(h.app.page,4,"反向惯性应能从邮箱列表直接回滚");
+    h.hover(stay,0.12);h.wheel(40.0);assert_eq!(h.app.page,3);assert_eq!(h.app.todo_first,0);
+    h.hover(stay,0.12);h.wheel(40.0);assert_eq!(h.app.page,2);assert_eq!(h.app.clip_first,0,"反向穿过剪贴板也不能滚动列表");
+}
+
+#[test]
+fn wheel_page_lock_expires_after_pause_or_pointer_move_and_scrolls_lists(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    overflowing_clipboard(&mut h);overflowing_todos(&mut h);overflowing_mailbox(&mut h);
+    h.app.show_page(2);h.hover(H::local(300.0,60.0),0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,3);assert_eq!(h.app.clip_first,0);
+    h.hover(H::local(300.0,60.0),0.7);
+    h.wheel(-40.0);assert_eq!(h.app.page,3,"停顿超过 0.6s 后应恢复内部滚动");assert_eq!(h.app.clip_first,1);
+    overflowing_clipboard(&mut h);
+    h.app.show_page(2);h.hover(H::local(300.0,60.0),0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,3);
+    h.hover(H::local(300.0,72.0),0.05);
+    h.wheel(-40.0);assert_eq!(h.app.page,3,"移动超过 10px 后应解锁并滚动列表");assert_eq!(h.app.clip_first,1);
+    h.app.show_page(3);h.app.todo_first=0;h.hover(H::local(300.0,60.0),0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,4);assert_eq!(h.app.todo_first,0);
+    h.hover(H::local(300.0,60.0),0.7);
+    h.wheel(-40.0);assert_eq!(h.app.page,4,"待办在锁定过期后应内部滚动");assert_eq!(h.app.todo_first,1);
+    // (100,90) 在待办列表外、邮箱列表内，保证先切进邮箱再于原位等待过期。
+    h.app.show_page(4);h.hover(H::local(100.0,90.0),0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,5);
+    h.hover(H::local(100.0,90.0),0.7);
+    h.wheel(-40.0);assert_eq!(h.app.page,5,"邮箱列表在锁定过期后应留下内部滚动，不切页");
+}
+
+#[test]
+fn shift_wheel_turns_pages_inside_overflowing_lists_including_mail(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    overflowing_clipboard(&mut h);overflowing_todos(&mut h);overflowing_mailbox(&mut h);
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),0.5);
+    h.wheel_shift(-40.0);assert_eq!(h.app.page,4);assert_eq!(h.app.clip_first,0,"Shift+滚轮切页不能滚动剪贴板");
+    h.app.show_page(4);h.hover(H::local(300.0,60.0),0.5);
+    h.wheel_shift(-40.0);assert_eq!(h.app.page,5);assert_eq!(h.app.todo_first,0,"Shift+滚轮切页不能滚动待办");
+    h.app.show_page(5);h.hover(H::local(200.0,90.0),0.5);
+    h.wheel_shift(-40.0);assert_eq!(h.app.page,6,"Shift+滚轮应能从溢出的邮箱列表直接切页");
+    h.app.show_page(5);h.hover(H::local(200.0,90.0),0.5);
+    h.wheel_shift(40.0);assert_eq!(h.app.page,4,"Shift+滚轮反向也应切页");
+}
+
+#[test]
+fn mail_reading_ignores_shift_wheel_and_page_lock(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    overflowing_mailbox(&mut h);
+    h.app.mail.recent[0].summary="正文内容。".repeat(200).into();
+    h.app.show_page(4);h.hover(H::local(100.0,90.0),0.5);
+    h.wheel(-40.0);assert_eq!(h.app.page,5,"应先滚进邮箱列表并启动惯性");
+    h.app.mail.open_uid=Some(("test@qq.com".into(),1));
+    h.hover(H::local(100.0,90.0),0.05);
+    h.wheel(-120.0);h.wheel_shift(-120.0);h.wheel_shift(120.0);
+    assert_eq!(h.app.page(),5,"阅读邮件正文时即使刚切页或按住 Shift 也不能翻页");
+    assert_eq!(h.app.mail.open_uid,Some(("test@qq.com".into(),1)));
+    h.app.show_page(5);h.app.mail.open_uid=Some(("test@qq.com".into(),1));
+    for (x,y) in [(210.0,18.0),(200.0,90.0),(270.0,214.0)]{
+        h.hover(H::local(x,y),0.5);h.wheel_shift(-120.0);
+        assert_eq!(h.app.page(),5,"阅读邮件时在 ({x},{y}) 按住 Shift 也不能翻页");
+        assert_eq!(h.app.mail.open_uid,Some(("test@qq.com".into(),1)));
+    }
 }
 
 #[test]

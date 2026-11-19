@@ -96,6 +96,10 @@ const OPEN_H: (f32, f32) = (290.0, 0.74);
 const CLOSE: (f32, f32) = (620.0, 1.0);
 const SWELL_K: (f32, f32) = (420.0, 0.8);
 const PAGE_SLIDE: f32 = 46.0;
+/// 滚轮切页后的惯性锁定时长：这段时间内指针几乎不动则继续优先切页。
+const WHEEL_PAGE_LOCK: f64 = 0.60;
+/// 惯性锁定期间允许的指针抖动（窗口/画布逻辑像素），超过则立刻解锁。
+const WHEEL_PAGE_LOCK_MOVE: f32 = 10.0;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -748,6 +752,8 @@ pub struct App {
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
+    wheel_page_lock_until: f64,
+    wheel_page_lock_pos: Option<Pos2>,
 
     // 拖入
     pub(crate) drag_hot: bool,
@@ -947,6 +953,8 @@ impl App {
             wheel_delta: 0.0,
             wheel_at: -1.0,
             wheel_page_at: -1.0,
+            wheel_page_lock_until: -1.0,
+            wheel_page_lock_pos: None,
             drag_hot: false,
             drag_a: 0.0,
             drag_saved: None,
@@ -1660,6 +1668,8 @@ impl App {
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
     pub(crate) fn go(&mut self, page: usize, dir: f32) {
         if page == self.page || !self.settings.visible_pages[page] { return; }
+        self.wheel_page_lock_until=-1.0;
+        self.wheel_page_lock_pos=None;
         self.music_volume_open=false;
         self.subpage=None;
         // 连点：上一段过渡还没结束时，以当前页为起点重新开始，位移速度保留。
@@ -1944,52 +1954,97 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
+        // 滚轮切页惯性只用窗口坐标判断位移，避免从矮页切到高页时 content_origin 变化被误判为移动。
+        // 仅由滚轮触发的 navigate_page 启动锁定；点击/键盘 go()、编辑、阅读邮件、音量条展开都会清掉。
+        if self.wheel_page_lock_pos.is_some() {
+            let moved=env.cursor.map_or(true,|c|self.wheel_page_lock_pos.is_some_and(|p|c.distance(p)>WHEEL_PAGE_LOCK_MOVE));
+            if self.t>=self.wheel_page_lock_until || moved || !self.open || !page_hover
+                || self.is_editing() || self.todo_choosing || self.mail.open_uid.is_some() || self.music_volume_open
+            {
+                self.wheel_page_lock_until=-1.0;
+                self.wheel_page_lock_pos=None;
+            } else {
+                ctx.input_mut(|i|i.smooth_scroll_delta=Vec2::ZERO);
+            }
+        }
         if (!self.is_editing() || self.todo_choosing) && page_hover && self.open && self.reveal > 0.95 {
-            let (scroll, left, right, esc) = ctx.input(|i| (i.raw_scroll_delta.y, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
+            let (scroll_y, scroll_x, left, right, esc, shift) = ctx.input(|i| (i.raw_scroll_delta.y, i.raw_scroll_delta.x, i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape), i.modifiers.shift));
             if esc { self.hover_lock = true; }
             if (left || right) && !self.todo_choosing {
                 self.wheel_delta=0.0;
                 self.navigate_page(right);
-            } else if scroll!=0.0 {
+            } else {
                 let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
                 let mail_reading=inside && self.page==5 && self.mail.open_uid.is_some();
-                let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0),Pos2::new(380.0,130.0)).contains(cursor)
-                    || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.contains(cursor));
-                if mail_reading || mail_list || music_volume {self.wheel_delta=0.0;}
-                else {
-                    // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
+                // egui 0.31 在按下 Shift 时把垂直滚轮写入 raw_scroll_delta.x，并把 y 清零。
+                let scroll=if shift {scroll_x+scroll_y}else{scroll_y};
+                let force_page=!self.todo_choosing && !mail_reading && scroll!=0.0 && (shift || self.wheel_page_lock_pos.is_some());
+                if force_page {
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
                     self.wheel_at=self.t;
                     self.wheel_delta+=scroll;
                     if self.wheel_delta.abs()>=8.0 {
                         let next=self.wheel_delta<0.0;
                         self.wheel_delta=0.0;
-                        let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
-                        let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
-                        let clipboard_tab=self.page==3 && self.shelf_tab==1;
-                        let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
-                        let list=match self.page {
-                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
-                            4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
-                                =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
-                            3 if clipboard_body
-                                =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
-                            3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
-                                =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
-                            _=>None,
-                        };
-                        let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);
-                        let scrolled=list.is_some_and(|(first,max)|{
-                            let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
-                            let changed=target!=*first;*first=target;changed
-                        });
-                        // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
-                        if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.08 {
+                        if self.t-self.wheel_page_at>=0.08 {
+                            let from=self.page;
                             self.navigate_page(next);
                             self.wheel_page_at=self.t;
+                            if self.page!=from {
+                                self.wheel_page_lock_until=self.t+WHEEL_PAGE_LOCK;
+                                self.wheel_page_lock_pos=env.cursor;
+                            }
                         }
-                        ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                    }
+                    ctx.input_mut(|i|{
+                        i.raw_scroll_delta=Vec2::ZERO;
+                        i.smooth_scroll_delta=Vec2::ZERO;
+                        i.events.retain(|event|!matches!(event,egui::Event::MouseWheel{..}));
+                    });
+                } else if scroll_y!=0.0 {
+                    let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
+                    let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0),Pos2::new(380.0,130.0)).contains(cursor)
+                        || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.contains(cursor));
+                    if mail_reading || mail_list || music_volume {self.wheel_delta=0.0;}
+                    else {
+                        // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
+                        if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll_y<0.0 {self.wheel_delta=0.0;}
+                        self.wheel_at=self.t;
+                        self.wheel_delta+=scroll_y;
+                        if self.wheel_delta.abs()>=8.0 {
+                            let next=self.wheel_delta<0.0;
+                            self.wheel_delta=0.0;
+                            let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
+                            let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
+                            let clipboard_tab=self.page==3 && self.shelf_tab==1;
+                            let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
+                            let list=match self.page {
+                                CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
+                                4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
+                                    =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
+                                3 if clipboard_body
+                                    =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
+                                3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
+                                    =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
+                                _=>None,
+                            };
+                            let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);
+                            let scrolled=list.is_some_and(|(first,max)|{
+                                let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
+                                let changed=target!=*first;*first=target;changed
+                            });
+                            // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
+                            if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.08 {
+                                let from=self.page;
+                                self.navigate_page(next);
+                                self.wheel_page_at=self.t;
+                                if self.page!=from {
+                                    self.wheel_page_lock_until=self.t+WHEEL_PAGE_LOCK;
+                                    self.wheel_page_lock_pos=env.cursor;
+                                }
+                            }
+                            ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;i.events.retain(|event|!matches!(event,egui::Event::MouseWheel{..}));});
+                        }
                     }
                 }
             }

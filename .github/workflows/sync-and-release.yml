@@ -103,7 +103,7 @@ jobs:
       UPSTREAM_URL: ${{ needs.check.outputs.upstream_url }}
       UPSTREAM_TITLE: ${{ needs.check.outputs.upstream_title }}
       FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
-      DAOZAI_BUILD_LABEL: hover-50ms
+      DAOZAI_BUILD_LABEL: hover-50ms+wheel
     steps:
       - name: Checkout fork scripts
         uses: actions/checkout@v4
@@ -142,7 +142,7 @@ jobs:
         shell: pwsh
         working-directory: upstream
         env:
-          DAOZAI_BUILD_LABEL: hover-50ms
+          DAOZAI_BUILD_LABEL: hover-50ms+wheel
         run: |
           $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
           ./scripts/package.ps1 -NsisCompiler $compiler
@@ -184,15 +184,17 @@ jobs:
         run: |
           $tag = $env:TAG
           $version = $env:VERSION
-          $title = "$($env:UPSTREAM_TITLE)（50ms 悬停补丁版）"
+          $title = "$($env:UPSTREAM_TITLE)（50ms 悬停 + 滚轮切页补丁版）"
           $notes = @"
           基于上游 [$tag]($($env:UPSTREAM_URL)) 自动构建的补丁版。
 
           - HOVER_INTENT: 0.20s -> 0.05s
           - MINIMAL_HOVER_INTENT: 0.40s -> 0.10s
+          - 滚轮连续切页：切页后 0.60s 内指针移动不超过 10px 时优先切页，可穿过溢出的置物架/剪贴板/待办/日程/邮箱列表
+          - Shift+滚轮随时强制切页（阅读邮件正文除外）
           - 应用内自动更新源改为 ``wodetiannacao/xiaotang-daozai``
 
-          LEAVE_DELAY 与 LIFT_HOLD 未改动。About 页构建标签为 ``hover-50ms``（不影响版本号与更新比较）。
+          LEAVE_DELAY 与 LIFT_HOLD 未改动。About 页构建标签为 ``hover-50ms+wheel``（不影响版本号与更新比较）。
           "@
           $notes = $notes -replace '(?m)^          ', ''
 
