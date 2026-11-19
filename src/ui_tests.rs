@@ -2397,7 +2397,7 @@ fn music_lyrics_respect_the_switch_and_do_not_show_stale_or_unsynced_lines() {
 fn hover_expands_with_overshoot_and_leave_collapses() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.1);
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.02);
     assert!(h.app.progress() < 0.1, "意图缓冲期内不应展开");
     let mut peak: f32 = 0.0;
     for _ in 0..60 {
@@ -2447,7 +2447,7 @@ fn browser_minimal_closes_the_open_island_but_still_allows_deliberate_hover(){
     h.browser_at_top=Some(true);h.frame(vec![]);
     assert!(!h.app.open,"切到浏览器时不能继续保留展开状态遮挡标签栏");
     assert!(!h.hit.contains(Pos2::new(WIN_W/2.0,12.0)),"收起动画期间也应让标签栏接收点击");
-    h.hover(Pos2::new(WIN_W/2.0,2.0),0.25);
+    h.hover(Pos2::new(WIN_W/2.0,2.0),0.02);
     assert!(!h.app.open,"短暂碰到刘海不能误触");
     h.hover(Pos2::new(WIN_W/2.0,2.0),0.6);
     assert!(h.app.open,"仍应能主动悬停打开岛");
@@ -2477,10 +2477,10 @@ fn minimal_hover_requires_continuous_deliberate_contact() {
     h.app.settings.minimal=true;
     for _ in 0..90 {h.frame(vec![]);}
     let inside=Pos2::new(WIN_W/2.0,2.0);
-    h.hover(inside,0.25);
+    h.hover(inside,0.02);
     assert!(!h.app.open,"短暂经过极简刘海不得展开");
     h.hover(Pos2::new(WIN_W/2.0,8.0),0.1);
-    h.hover(inside,0.25);
+    h.hover(inside,0.02);
     assert!(!h.app.open,"移出刘海应重新计算停留时间");
     h.hover(inside,0.7);
     assert!(h.app.open,"在刘海内持续停留仍应展开");

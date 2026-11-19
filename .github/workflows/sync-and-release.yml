@@ -202,7 +202,7 @@ jobs:
           git -C upstream config user.name "github-actions[bot]"
           git -C upstream config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C upstream config core.autocrlf false
-          git -C upstream add -- src/app.rs src/updates.rs
+          git -C upstream add -- src/app.rs src/updates.rs src/ui_tests.rs
           if (-not (git -C upstream diff --cached --quiet)) {
             git -C upstream commit -m "Apply 50ms hover patch and retarget updater to $env:FORK_REPO"
           }
