@@ -805,6 +805,15 @@ fn mail_reading_ignores_shift_wheel_and_page_lock(){
 #[test]
 fn reader_actions_remain_bound_to_the_opened_mailbox() {
 '@
+# ⑥ v0.6.70 给 mail::Account 新增了 use_windows_proxy 字段，插入的测试需同步补上。
+if ($usesPageTurnDuration) {
+    $accountInitOld = 'crate::mail::Account{custom:None,'
+    $accountInitNew = 'crate::mail::Account{use_windows_proxy:false,custom:None,'
+    if (-not $test_wheel_cases_new.Contains($accountInitOld)) {
+        throw '未找到插入测试中的 mail::Account 初始化，无法补 use_windows_proxy'
+    }
+    $test_wheel_cases_new = $test_wheel_cases_new.Replace($accountInitOld, $accountInitNew)
+}
 Replace-UniqueSnippet `
     -Path $tests `
     -Old $test_wheel_cases_old `
