@@ -1,0 +1,71 @@
+name: Verify v0.6.70 adaptation (no release)
+on:
+  push:
+    branches: [adapt/upstream-v0.6.70]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 1
+      DAOZAI_BUILD_LABEL: hover-50ms+wheel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Renly1994/xiaotang-daozai
+          ref: 0615f19786d3d5b6b4c2c74be987fbe855e9fe03
+          path: upstream
+          persist-credentials: false
+      # ① 验证 PowerShell 补丁可重复执行，不改动非预期文件。
+      - name: Apply and reapply customization
+        shell: pwsh
+        run: |
+          $patch = Resolve-Path ./fork/scripts/apply-custom-patch.ps1
+          $src = Resolve-Path ./upstream
+          & $patch -RepoRoot $src.Path
+          $first = git -C upstream diff
+          & $patch -RepoRoot $src.Path
+          $second = git -C upstream diff
+          if (Compare-Object -ReferenceObject $first -DifferenceObject $second -SyncWindow 0) {
+            throw 'The second patch application changed the result'
+          }
+          git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched source failed git diff --check' }
+          $paths = (git -C upstream diff --name-only) -join ','
+          if ($paths -cne 'src/app.rs,src/ui_tests.rs,src/updates.rs') { throw "Unexpected patch scope: $paths" }
+      # ② 使用官方新版测试配置，包含插件功能和原有代理回归测试。
+      - name: Verify HTTP proxy request format
+        working-directory: upstream
+        run: cargo +stable test --locked --manifest-path vendor/ureq/Cargo.toml --lib --no-default-features --features tls,gzip --target x86_64-pc-windows-msvc unit::tests
+      - name: Run Windows test suite
+        working-directory: upstream
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo +stable test --locked --all-targets --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc -- --test-threads=1
+      # ③ 只在运行器内生成并检查文件，不创建标签、不发布、不上传产物。
+      - name: Verify upstream packaging and checksums
+        shell: pwsh
+        working-directory: upstream
+        run: |
+          $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
+          ./scripts/package.ps1 -NsisCompiler $compiler
+          $names = @('Daozai-v0.6.70-windows-x64.zip', 'Daozai-Setup-v0.6.70-x64.exe')
+          $sums = Get-Content -LiteralPath ./dist/SHA256SUMS.txt
+          foreach ($name in $names) {
+            $file = Get-Item -LiteralPath (Join-Path ./dist $name)
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($file.Length -le 0 -or $sums -cnotcontains "$hash  $name") { throw "Invalid package: $name" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "./dist/$($names[0])").Path)
+          try {
+            $entry = @($zip.Entries | Where-Object { $_.FullName.Replace('\','/') -ceq 'Daozai-v0.6.70-windows-x64/daozai.exe' })
+            if ($entry.Count -ne 1 -or $entry[0].Length -le 0) { throw 'Portable executable is missing' }
+          } finally { $zip.Dispose() }
